@@ -4,14 +4,15 @@ module.exports = Config
 
 function Config (opts) {
   if (!(this instanceof Config)) return new Config(opts)
-  this._rs = opts.rs || new RS(opts.bins)
+  if (opts.rs) {
+    this._rs = opts.rs
+  } else if (opts.bins) {
+    this._rs = new RS(opts.bins)
+  } else if (opts.capacities) {
+    this._rs = new RS
+    this._rs.set(opts.capacities)
+  }
   this._writers = opts.writers
-}
-
-Config.init = function ({ capacities, writers }) {
-  var rs = new RS
-  rs.set(capacities)
-  return new Config({ rs, writers })
 }
 
 Config.parse = function (str) {

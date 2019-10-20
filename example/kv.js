@@ -1,44 +1,38 @@
-let argv = require('minimist')(process.argv.slice(2))
+var argv = require('minimist')(process.argv.slice(2), {
+  alias: { d: 'datadir' }
+})
 
-var kv = {
-  hash: function (key) {
-    let keys = key.split('/')
-    const buf = Buffer.allocUnsafe(8 * keys.length)
-    for (var i = 0; i < keys.length; i++) {
-      const key = Buffer.from(keys[i])
-      sodium.crypto_shorthash(i ? buf.slice(i * 8) : buf, key, KEY)
-    }
-    return buf
-  }
-}
+var kv = require('../')({
+  network: require('peermq/network'),
+  bins: argv.bins,
+  storage: argv.datadir
+})
 
-if (argv._[0] === 'listen') {
-  let shard = require('../')({
-    cluster: argv.cluster,
-    swarm: require('discovery-swarm')(),
+if (argv._[0] === 'id') {
+  kv.getId(function (err, id) {
+    if (err) console.error(err)
+    else console.log(id.toString('hex'))
   })
-  shard.listen(function (id) {
-    console.log(id)
+} else if (argv._[0] === 'add-peer') {
+  argv._.slice(1).forEach(function (peer) {
+    kv.addPeer(peer)
   })
-} else if (argv._[0] === 'batch') {
-  let shard = require('../')({
-    cluster: argv.cluster,
-    swarm: require('discovery-swarm')(),
-    hash
+} else if (argv._[0] === 'listen') {
+  kv.listen(function (err, pubKey) {
+    if (err) console.error(err)
+    else console.log(pubKey.toString('hex'))
   })
-  let kv = shard.connect({
-    network: argv.network
-  })
-  let rows = []
+} else if (argv._[0] === 'connect') {
+  kv.connect()
+} else {
   ;[].concat(argv.put).forEach(s => {
-    let [key,value] = s.split('=')
-    rows.push({ type: 'put', key, value })
+    var [key,value] = s.split('=')
+    kv.put(key, value)
   })
   ;[].concat(argv.del).forEach(key => {
-    rows.push({ type: 'del', key })
+    kv.del(key)
   })
-  kv.batch(rows, (err, nodes) => {
+  kv.flush(function (err) {
     if (err) console.error(err)
-    else nodes.forEach(node => { console.log(node) })
   })
 }
