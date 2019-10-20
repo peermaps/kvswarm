@@ -230,7 +230,7 @@ KV.prototype.listen = function (cb) {
       objectMode: true,
       transform: function ({ from, seq, data }, enc, next) {
         console.log(`RECEIVED ${from}@${seq}: ${data}`)
-        // self._true.put(...)
+        // self._trie.put(...)
         self._mq.archive({ from, seq }, next)
       }
     }))
