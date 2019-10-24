@@ -20,6 +20,7 @@ if (argv._[0] === 'id') {
   }).serialize())
 } else if (argv._[0] === 'get') {
   var kv = getKV()
+  kv.connect()
   kv.get(argv._[1], function (err, value) {
     if (err) console.error(err)
     else console.log(value)

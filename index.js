@@ -7,11 +7,13 @@ var sodium = require('sodium-universal')
 var RS = require('random-slicing')
 var hash = require('./lib/hash.js')
 var HashTable = require('./lib/hash-table.js')
-var xbytes = require('xbytes')
 var varint = require('varint')
+var pump = require('pump')
+var { createHash } = require('crypto')
 var path = require('path')
 
 var PUT = 1, DEL = 2
+var TOPIC_PREFIX = Buffer.from('peermq!')
 
 module.exports = KV
 
@@ -24,8 +26,15 @@ function KV (opts) {
     throw new Error('storage must be a string path or function.'
       + ' received: ' + typeof self._storage)
   }
+  self._network = opts.network
   self._mq = peermq({
-    network: opts.network,
+    topic: function (buf) {
+      var h = createHash('sha256')
+      h.update(TOPIC_PREFIX)
+      h.update(buf)
+      return h.digest()
+    },
+    network: self._network,
     storage: function (name) {
       return self._getStorage('mq',name)
     }
@@ -44,8 +53,10 @@ function KV (opts) {
   }
   self._table = new HashTable(self._rs.getBins())
   self._blocks = {}
-  self._connections = {}
+  self._connections = { trie: {}, mq: {} }
   self._core = null
+  self._trieCores = {}
+  self._tries = {}
 }
 KV.prototype = Object.create(EventEmitter.prototype)
 
@@ -116,7 +127,12 @@ KV.prototype.load = function (config, cb) {
 KV.prototype.get = function (key, cb) {
   var hkey = hash(sodium, [key])
   var nodeKey = this._table.lookup(hkey)
-  console.log(`TODO: lookup ${hkey.toString('hex')} on ${nodeKey.toString('hex')}`)
+  var k = nodeKey.toString('hex')
+  var trie = this._tries[k]
+  if (trie) return trie.get(key, cb)
+  this.once('_trie!'+k, function (trie) {
+    trie.get(key, cb)
+  })
 }
 
 KV.prototype.put = function (key, value) {
@@ -171,7 +187,7 @@ KV.prototype.flush = function (opts, cb) {
       for (var j = 0; j < b.key.length; j++) {
         message[offset++] = b.key[j]
       }
-      var vkey = varint.encode(b.key.length)
+      var vkey = varint.encode(b.value.length)
       for (var j = 0; j < vkey.length; j++) {
         message[offset++] = vkey[j]
       }
@@ -196,7 +212,17 @@ KV.prototype.connect = function () {
   var self = this
   var bins = self._rs.getBins()
   Object.keys(bins).forEach(function (key) {
-    self._connections[key] = self._mq.connect(key)
+    self._connections.mq[key] = self._mq.connect(key)
+    var bkey = Buffer.from(key, 'hex')
+    var c = self._connections.trie[key] = self._network.connect(bkey)
+    self._trieCores[key] = hypercore(self._getStorage('kv',key), bkey)
+    self._tries[key] = hypertrie(null, { feed: self._trieCores[key] })
+    //var r = self._tries[key].replicate({ sparse: true })
+    var r = self._trieCores[key].replicate({ sparse: true })
+    pump(c, r, c, function (err) {
+      // todo: reconnect
+    })
+    self.emit('_trie!'+key, self._tries[key])
   })
 }
 
@@ -230,15 +256,66 @@ KV.prototype.listen = function (cb) {
       objectMode: true,
       transform: function ({ from, seq, data }, enc, next) {
         console.log(`RECEIVED ${from}@${seq}: ${data}`)
-        // self._trie.put(...)
-        self._mq.archive({ from, seq }, next)
+        self._handleData(data, function (err) {
+          if (err) {
+            console.log(err + '\n')
+          }
+          self._mq.clear({ from, seq }, next)
+        })
       }
     }))
     self._mq.listen(function (err, server) {
-      if (err) cb(err)
-      else cb(null, kp.hypercore.publicKey, server)
+      if (err) return cb(err)
+      self._mqServer = server
+      cb(null, kp.hypercore.publicKey, server)
+    })
+    self._server = self._network.createServer(function (stream) {
+      pump(stream, self._core.replicate({ download: false }), stream)
     })
   })
+}
+
+KV.prototype._handleData = function (data, cb) {
+  var offset = 0, pending = 1, finished = false
+  try {
+    while (offset < data.length) {
+      if (data[0] === PUT) {
+        offset += 1
+        var klen = varint.decode(data, offset)
+        offset += varint.encodingLength(klen)
+        var key = data.slice(offset,offset+klen)
+        offset += klen
+        var vlen = varint.decode(data, offset)
+        offset += varint.encodingLength(vlen)
+        var value = data.slice(offset,offset+vlen)
+        offset += vlen
+        pending++
+        this._trie.put(key.toString(), value, done)
+      } else if (data[0] === DEL) {
+        offset += 1
+        var klen = varint.decode(data, offset)
+        offset += varint.encodingLength(klen)
+        var key = data.slice(offset,offset+klen)
+        offset += klen
+        pending++
+        this._trie.del(key.toString(), done)
+      } else {
+        break
+      }
+    }
+  } catch (err) {
+    process.nextTick(done, err)
+  }
+  done()
+  function done (err) {
+    if (finished) {}
+    else if (err) {
+      finished = true
+      cb(err)
+    } else if (--pending === 0) {
+      cb()
+    }
+  }
 }
 
 function noop () {}

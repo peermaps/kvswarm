@@ -5,7 +5,8 @@
     "kvswarm": "bin/cmd.js"
   },
   "dependencies": {
-    "peermq": "^2.0.0",
+    "peermq": "^3.3.0",
+    "pump": "^3.0.0",
     "random-slicing": "^2.0.2",
     "varint": "^5.0.0",
     "xbytes": "^1.5.0"

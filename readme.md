@@ -1,4 +1,4 @@
-# kv-swarm
+# kvswarm
 
 spread a key/value store across multiple nodes (horizontal partitioning)
 
@@ -28,16 +28,16 @@ $ kvswarm listen -d /tmp/c -c config.json &
 Once all the nodes are setup, you can write documents from nodes X and Y:
 
 ```
-$ kv-swarm -c config.json -d /tmp/x write --put.greeting=hi
-$ kv-swarm -c config.json -d /tmp/y write --put.cool=beans
-$ kv-swarm -c config.json -d /tmp/x connect &
-$ kv-swarm -c config.json -d /tmp/y connect &
+$ kvswarm -c config.json -d /tmp/x write --put.greeting=hi
+$ kvswarm -c config.json -d /tmp/y write --put.cool=beans
+$ kvswarm -c config.json -d /tmp/x connect &
+$ kvswarm -c config.json -d /tmp/y connect &
 ```
 
 and any node can read from the database:
 
 ```
-$ kv-swarm -c config.json -d /tmp/x get cool
+$ kvswarm -c config.json -d /tmp/x get cool
 beans
 ```
 
