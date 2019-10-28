@@ -5,9 +5,13 @@
     "kvswarm": "bin/cmd.js"
   },
   "dependencies": {
-    "peermq": "^3.3.0",
+    "hypercore": "^8.2.5",
+    "hypertrie": "^4.0.0",
+    "minimist": "^1.2.0",
+    "peermq": "^4.0.1",
     "pump": "^3.0.0",
     "random-slicing": "^2.0.2",
+    "sodium-universal": "^2.0.0",
     "varint": "^5.0.0",
     "xbytes": "^1.5.0"
   },

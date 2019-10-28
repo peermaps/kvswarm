@@ -217,8 +217,11 @@ KV.prototype.connect = function () {
     var c = self._connections.trie[key] = self._network.connect(bkey)
     self._trieCores[key] = hypercore(self._getStorage('kv',key), bkey)
     self._tries[key] = hypertrie(null, { feed: self._trieCores[key] })
-    //var r = self._tries[key].replicate({ sparse: true })
-    var r = self._trieCores[key].replicate({ sparse: true })
+    //var r = self._tries[key].replicate(true, { sparse: true })
+    var r = self._trieCores[key].replicate(true, { sparse: true, live: true })
+    r.on('error', function (err) {
+      console.log('error=',err)
+    })
     pump(c, r, c, function (err) {
       // todo: reconnect
     })
@@ -227,8 +230,11 @@ KV.prototype.connect = function () {
 }
 
 KV.prototype.disconnect = function () {
-  Object.keys(self._connections).forEach(function (key) {
-    self._connections[key].close()
+  Object.keys(self._connections.mq).forEach(function (key) {
+    self._connections.mq[key].close()
+  })
+  Object.keys(self._connections.trie).forEach(function (key) {
+    self._connections.trie[key].close()
   })
 }
 
@@ -270,8 +276,12 @@ KV.prototype.listen = function (cb) {
       cb(null, kp.hypercore.publicKey, server)
     })
     self._server = self._network.createServer(function (stream) {
-      pump(stream, self._core.replicate({ download: false }), stream)
+      var r = self._core.replicate(false, { download: false, live: true })
+      pump(stream, r, stream, function (err) {
+        console.log('error=',err)
+      })
     })
+    self._server.listen(kp.hypercore.publicKey)
   })
 }
 
@@ -290,6 +300,7 @@ KV.prototype._handleData = function (data, cb) {
         var value = data.slice(offset,offset+vlen)
         offset += vlen
         pending++
+        //console.log('PUT', key.toString(), value)
         this._trie.put(key.toString(), value, done)
       } else if (data[0] === DEL) {
         offset += 1
