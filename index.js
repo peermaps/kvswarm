@@ -65,40 +65,44 @@ KV.prototype._getStorage = function (prefix, name) {
     return path.join(this._storage, prefix, name)
   } else if (typeof this._storage === 'function') {
     return this._storage(path.join(prefix, name))
+  } else {
+    throw new Error('unsupported storage type ' + typeof this._storage)
+  }
+}
+
+KV.prototype._getStorageFn = function (prefix, name) {
+  var self = this
+  return function (x) {
+    return self._getStorage(prefix, path.join(name, x))
   }
 }
 
 KV.prototype.setWriters = function (writers, cb) {
   var self = this
   if (!cb) cb = noop
-  var finished = false
   self._mq.getPeers(function (err, peers) {
     if (err) return cb(err)
-    var pending = 1
+    var add = [], remove = []
     for (var i = 0; i < writers.length; i++) {
       var w = writers[i]
       if (peers.indexOf(w) < 0) {
-        pending++
-        self.addWriter(w, done)
+        add.push(w)
       }
     }
     for (var i = 0; i < peers.length; i++) {
       var p = peers[i]
       if (writers.indexOf(p) < 0) {
-        pending++
-        self.removeWriter(p, done)
+        remove.push(p)
       }
     }
+    self._mq.addPeers(add, function (err) {
+      if (err) return cb(err)
+      self._mq.removePeers(remove, function (err) {
+        if (err) cb(err)
+        else cb()
+      })
+    })
   })
-  function done (err) {
-    if (finished) {}
-    else if (err) {
-      finished = true
-      cb(err)
-    } else {
-      cb()
-    }
-  }
 }
 
 KV.prototype.getWriters = function (cb) {
@@ -118,21 +122,43 @@ KV.prototype.setBins = function (update) {
   this._table.update(this._rs.getBins())
 }
 
-KV.prototype.load = function (config, cb) {
+KV.prototype.setConfig = function (config, cb) {
   this._rs = config._rs
-  this.setWriters(config._writers, cb)
   this._table.update(this._rs.getBins())
+  this.setWriters(config._writers, cb)
 }
 
-KV.prototype.get = function (key, cb) {
+KV.prototype.get = function (key, opts, cb) {
+  var self = this
+  if (typeof opts === 'function') {
+    cb = opts
+    opts = {}
+  }
+  if (!opts) opts = {}
+  if (!cb) cb = noop
   var hkey = hash(sodium, [key])
   var nodeKey = this._table.lookup(hkey)
   var k = nodeKey.toString('hex')
   var trie = this._tries[k]
-  if (trie) return trie.get(key, cb)
-  this.once('_trie!'+k, function (trie) {
-    trie.get(key, cb)
-  })
+  if (trie) check(trie)
+  else this.once('_trie!'+k, set)
+
+  function set (t) {
+    trie = t
+    check()
+  }
+  function check () {
+    if (trie.feed.remoteLength === 0) {
+      console.log('FEED',trie.feed.remoteLength)
+      trie.feed.once('remote-update', check)
+    } else {
+      get()
+    }
+  }
+  function get () {
+    console.log('GET', key, trie.feed.remoteLength)
+    trie.get(key, opts, cb)
+  }
 }
 
 KV.prototype.put = function (key, value) {
@@ -215,17 +241,23 @@ KV.prototype.connect = function () {
     self._connections.mq[key] = self._mq.connect(key)
     var bkey = Buffer.from(key, 'hex')
     var c = self._connections.trie[key] = self._network.connect(bkey)
-    self._trieCores[key] = hypercore(self._getStorage('kv',key), bkey)
+    self._trieCores[key] = hypercore(self._getStorageFn('kv',key), bkey)
+    var trie = hypertrie(null, { feed: self._trieCores[key] })
     self._tries[key] = hypertrie(null, { feed: self._trieCores[key] })
     //var r = self._tries[key].replicate(true, { sparse: true })
-    var r = self._trieCores[key].replicate(true, { sparse: true, live: true })
-    r.on('error', function (err) {
-      console.log('error=',err)
+    console.log('!!! replicate')
+    trie.ready(function () {
+      self._tries[key] = trie
+      console.log('!!! ready')
+      var r = self._trieCores[key].replicate(true, { sparse: true, live: true })
+      r.on('error', function (err) {
+        console.log('error=',err)
+      })
+      pump(c, r, c, function (err) {
+        // todo: reconnect
+      })
+      self.emit('_trie!'+key, trie)
     })
-    pump(c, r, c, function (err) {
-      // todo: reconnect
-    })
-    self.emit('_trie!'+key, self._tries[key])
   })
 }
 
@@ -250,7 +282,7 @@ KV.prototype.listen = function (cb) {
   self._mq.getKeyPairs(function (err, kp) {
     if (err) return cb(err)
     self._core = hypercore(
-      self._getStorage('kv','core'),
+      self._getStorageFn('kv','core'),
       kp.hypercore.publicKey,
       {
         storeSecretKey: false,
@@ -300,7 +332,7 @@ KV.prototype._handleData = function (data, cb) {
         var value = data.slice(offset,offset+vlen)
         offset += vlen
         pending++
-        //console.log('PUT', key.toString(), value)
+        console.log('PUT', key.toString(), value)
         this._trie.put(key.toString(), value, done)
       } else if (data[0] === DEL) {
         offset += 1
