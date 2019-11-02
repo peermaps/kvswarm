@@ -176,4 +176,8 @@ Add a writer by its hex string `key`
 
 Remove a writer by its hex string `key`
 
+# license
 
+[license zero parity](https://licensezero.com/licenses/parity)
+and [apache 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt)
+(contributions)
