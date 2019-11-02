@@ -120,7 +120,7 @@ KV.prototype.removeWriter = function (peer, cb) {
   this._mq.removePeer(peer, cb)
 }
 
-KV.prototype.setBins = function (update) {
+KV.prototype.setCapacities = function (update) {
   this._rs.set(update)
   this._table.update(this._rs.getBins())
 }
