@@ -5,7 +5,7 @@ var ram = require('random-access-memory')
 var network = require('peermq/test/lib/network.js')()
 
 test('kv', function (t) {
-  t.plan(12)
+  t.plan(16)
   var nodes = {
     A: new KV({ network, storage: storage('A') }),
     B: new KV({ network, storage: storage('B') }),
@@ -72,13 +72,15 @@ test('kv', function (t) {
       t.ifError(err)
       t.deepEqual(res.value, Buffer.from('hi'))
     })
+    nodes.Y.get('cool', function (err, res) {
+      t.ifError(err)
+      t.deepEqual(res.value, Buffer.from('beans'))
+    })
+    nodes.Y.get('greeting', function (err, res) {
+      t.ifError(err)
+      t.deepEqual(res.value, Buffer.from('hi'))
+    })
   }
 })
 
-function storage (id) {
-  var stores = {}
-  return function (name) {
-    if (!stores[name]) stores[name] = ram()
-    return stores[name]
-  }
-}
+function storage (id) { return ram }
