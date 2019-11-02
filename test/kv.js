@@ -5,6 +5,7 @@ var ram = require('random-access-memory')
 var network = require('peermq/test/lib/network.js')()
 
 test('kv', function (t) {
+  t.plan(12)
   var nodes = {
     A: new KV({ network, storage: storage('A') }),
     B: new KV({ network, storage: storage('B') }),
@@ -40,14 +41,22 @@ test('kv', function (t) {
     nodes.X.setConfig(config, done)
     nodes.Y.setConfig(config, done)
     done()
-    function done () { if (--pending === 0) write() }
+    function done () { if (--pending === 0) connect() }
+  }
+  function connect () {
+    nodes.A.listen()
+    nodes.B.listen()
+    nodes.C.listen()
+    nodes.X.connect()
+    nodes.Y.connect()
+    write()
   }
   function write () {
     nodes.X.put('greeting', 'hi')
     nodes.Y.put('cool', 'beans')
     var pending = 3
-    nodes.X.flush(done)
-    nodes.Y.flush(done)
+    nodes.X.flush({ receipt: true }, done)
+    nodes.Y.flush({ receipt: true }, done)
     done()
     function done (err) {
       t.ifError(err)
@@ -55,16 +64,14 @@ test('kv', function (t) {
     }
   }
   function sync () {
-    nodes.A.listen()
-    nodes.B.listen()
-    nodes.C.listen()
-    nodes.X.connect()
-    nodes.Y.connect()
-    setTimeout(function () {
-      nodes.X.get('cool', function (err, res) {
-        console.log('cool =>', err, res)
-      })
-    }, 1000)
+    nodes.X.get('cool', function (err, res) {
+      t.ifError(err)
+      t.deepEqual(res.value, Buffer.from('beans'))
+    })
+    nodes.X.get('greeting', function (err, res) {
+      t.ifError(err)
+      t.deepEqual(res.value, Buffer.from('hi'))
+    })
   }
 })
 

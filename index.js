@@ -14,6 +14,8 @@ var path = require('path')
 
 var PUT = 1, DEL = 2
 var TOPIC_PREFIX = Buffer.from('peermq!')
+var RECEIPT_SET_FROM = 1, RECEIPT_REQ = 2,
+  RECEIPT_RES_OK = 3, RECEIPT_RES_FAIL = 4
 
 module.exports = KV
 
@@ -57,6 +59,7 @@ function KV (opts) {
   self._core = null
   self._trieCores = {}
   self._tries = {}
+  self._connectReceipts = {}
 }
 KV.prototype = Object.create(EventEmitter.prototype)
 
@@ -140,24 +143,11 @@ KV.prototype.get = function (key, opts, cb) {
   var nodeKey = this._table.lookup(hkey)
   var k = nodeKey.toString('hex')
   var trie = this._tries[k]
-  if (trie) check(trie)
-  else this.once('_trie!'+k, set)
+  if (trie) get(trie)
+  else this.once('_trie!'+k, get)
 
-  function set (t) {
-    trie = t
-    check()
-  }
-  function check () {
-    if (trie.feed.remoteLength === 0) {
-      console.log('FEED',trie.feed.remoteLength)
-      trie.feed.once('remote-update', check)
-    } else {
-      get()
-    }
-  }
-  function get () {
-    console.log('GET', key, trie.feed.remoteLength)
-    trie.get(key, opts, cb)
+  function get (trie) {
+    trie.get(key, cb)
   }
 }
 
@@ -187,7 +177,9 @@ KV.prototype.flush = function (opts, cb) {
   var self = this
   var finished = false
   var pending = 1
+  var seqs = {}
   Object.keys(self._blocks).forEach(function (key) {
+    pending++
     var len = 0
     for (var i = 0; i < self._blocks[key].length; i++) {
       var b = self._blocks[key][i]
@@ -221,42 +213,108 @@ KV.prototype.flush = function (opts, cb) {
         message[offset++] = b.value[j]
       }
     }
-    self._mq.send({ to: key, message }, done)
+    self._mq.send({ to: key, message }, function (err, seq) {
+      if (!err) seqs[key] = seq
+      check(err)
+    })
   })
-  done()
-  function done (err) {
+  check()
+  function check (err) {
     if (finished) return
     if (err) {
       finished = true
       return cb(err)
     }
+    if (--pending === 0) return wait()
+  }
+  function wait () {
+    pending = 1
+    Object.keys(seqs).forEach(function (key) {
+      var seq = seqs[key]
+      if (!self._connectReceipts[key]) self._connectReceipts[key] = {}
+      if (!self._connectReceipts[key][seq]) self._connectReceipts[key][seq] = []
+      pending++
+      var core = self._trieCores[key]
+      self._connectReceipts[key][seq].push(f)
+      function f (err, coreLen) {
+        if (finished) return
+        if (err) {
+          finished = true
+          return cb(err)
+        }
+        core.update(coreLen, function (err) {
+          if (finished) return
+          if (err) {
+            finished = true
+            return cb(err)
+          }
+          if (--pending === 0) return cb()
+        })
+      }
+    })
     if (--pending === 0) return cb()
   }
 }
 
 KV.prototype.connect = function () {
   var self = this
-  var bins = self._rs.getBins()
-  Object.keys(bins).forEach(function (key) {
-    self._connections.mq[key] = self._mq.connect(key)
-    var bkey = Buffer.from(key, 'hex')
-    var c = self._connections.trie[key] = self._network.connect(bkey)
-    self._trieCores[key] = hypercore(self._getStorageFn('kv',key), bkey)
-    var trie = hypertrie(null, { feed: self._trieCores[key] })
-    self._tries[key] = hypertrie(null, { feed: self._trieCores[key] })
-    //var r = self._tries[key].replicate(true, { sparse: true })
-    console.log('!!! replicate')
-    trie.ready(function () {
-      self._tries[key] = trie
-      console.log('!!! ready')
-      var r = self._trieCores[key].replicate(true, { sparse: true, live: true })
+  self._mq.getKeyPairs(function (err, kp) {
+    if (err) return self.emit('error', err)
+    var pubKey = kp.hypercore.publicKey
+    var bins = self._rs.getBins()
+    Object.keys(bins).forEach(function (key) {
+      var m = self._connections.mq[key] = self._mq.connect(key)
+      var n = 0
+      m.on('ack', function (ack) {
+        ext.send(receiptReq(n++, ack))
+      })
+      var bkey = Buffer.from(key, 'hex')
+      var c = self._connections.trie[key] = self._network.connect(bkey)
+      self._trieCores[key] = hypercore(self._getStorageFn('kv',key), bkey)
+      var trie = hypertrie(null, { feed: self._trieCores[key] })
+      self._tries[key] = hypertrie(null, { feed: self._trieCores[key] })
+
+      var r = self._trieCores[key].replicate(true, {
+        sparse: true,
+        live: true
+      })
+      var ext = r.registerExtension('kvswarm', {
+        encoding: 'binary',
+        onmessage: function (msg, peer) {
+          if (msg[0] === RECEIPT_RES_FAIL || msg[0] === RECEIPT_RES_OK) {
+            var seq = varint.decode(msg,1)
+            if (!self._connectReceipts[key]) return
+            if (!self._connectReceipts[key][seq]) return
+            var rs = self._connectReceipts[key][seq]
+            if (msg[0] === RECEIPT_RES_FAIL) {
+              var err = new Error('receipt failed')
+              for (var i = 0; i < rs.length; i++) {
+                rs[i](err)
+              }
+            } else if (msg[0] === RECEIPT_RES_OK) {
+              var coreLen = varint.decode(msg,1+varint.encodingLength(seq))
+              for (var i = 0; i < rs.length; i++) {
+                rs[i](null, coreLen)
+              }
+            }
+            delete self._connectReceipts[key][seq]
+            if (Object.keys(self._connectReceipts[key]).length === 0) {
+              delete self._connectReceipts[key]
+            }
+          }
+        }
+      })
+      ext.send(receiptFrom(pubKey))
       r.on('error', function (err) {
         console.log('error=',err)
       })
       pump(c, r, c, function (err) {
         // todo: reconnect
       })
-      self.emit('_trie!'+key, trie)
+      trie.ready(function () {
+        self._tries[key] = trie
+        self.emit('_trie!'+key, trie)
+      })
     })
   })
 }
@@ -279,6 +337,7 @@ KV.prototype.listen = function (cb) {
   var self = this
   if (self._unread) throw new Error('already listening')
   self._unread = self._mq.createReadStream('unread', { live: true })
+  var receipts = []
   self._mq.getKeyPairs(function (err, kp) {
     if (err) return cb(err)
     self._core = hypercore(
@@ -293,15 +352,26 @@ KV.prototype.listen = function (cb) {
     self._unread.pipe(new Transform({
       objectMode: true,
       transform: function ({ from, seq, data }, enc, next) {
-        console.log(`RECEIVED ${from}@${seq}: ${data}`)
+        //console.log(`RECEIVED ${from}@${seq}: ${data}`)
         self._handleData(data, function (err) {
           if (err) {
             console.log(err + '\n')
           }
-          self._mq.clear({ from, seq }, next)
+          self._mq.clear({ from, seq }, check)
+          function check (err) {
+            next(err)
+            for (var i = 0; i < receipts.length; i++) {
+              var r = receipts[i]
+              if (seq >= r[0]) {
+                receipts.splice(i--,1)
+                r[2](err)
+              }
+            }
+          }
         })
       }
     }))
+    // todo: these 2 protocol swarms should be overlayed with an extension
     self._mq.listen(function (err, server) {
       if (err) return cb(err)
       self._mqServer = server
@@ -309,6 +379,37 @@ KV.prototype.listen = function (cb) {
     })
     self._server = self._network.createServer(function (stream) {
       var r = self._core.replicate(false, { download: false, live: true })
+      var from = null
+      var ext = r.registerExtension('kvswarm', {
+        encoding: 'binary',
+        onmessage: function (msg, peer) {
+          if (msg[0] === RECEIPT_SET_FROM) {
+            from = msg.slice(1,33).toString('hex')
+          } else if (msg[0] === RECEIPT_REQ) {
+            if (!from) return ext.send(receiptFail(n, 'recipient not set'))
+            var offset = 1
+            var n = varint.decode(msg,offset)
+            offset += varint.encodingLength(n)
+            var start = varint.decode(msg,offset)
+            offset += varint.encodingLength(start)
+            var len = varint.decode(msg,offset)
+            var bf = self._mq._bitfield.read[from]
+            if (!bf) return ext.send(receiptFail(n, 'bitfield not found'))
+            hasAll(bf, start, len, function (err, all) {
+              if (err) return ext.send(receiptFail(n, err.message))
+              if (all) return ext.send(receiptOk(n, self._trie.feed.length))
+              // otherwise wait until the data has been completely processed
+              receipts.push([
+                start, len, function (err) {
+                  return ext.send(err
+                    ? receiptFail(n, err)
+                    : receiptOk(n, self._trie.feed.length))
+                }
+              ])
+            })
+          }
+        }
+      })
       pump(stream, r, stream, function (err) {
         console.log('error=',err)
       })
@@ -332,7 +433,6 @@ KV.prototype._handleData = function (data, cb) {
         var value = data.slice(offset,offset+vlen)
         offset += vlen
         pending++
-        console.log('PUT', key.toString(), value)
         this._trie.put(key.toString(), value, done)
       } else if (data[0] === DEL) {
         offset += 1
@@ -362,3 +462,78 @@ KV.prototype._handleData = function (data, cb) {
 }
 
 function noop () {}
+
+function writeBuf (out, offset, src) {
+  for (var i = 0; i < src.length; i++) {
+    out[offset+i] = src[i]
+  }
+}
+
+function receiptReq (n, ack) {
+  var nLen = varint.encodingLength(n)
+  var startLen = varint.encodingLength(ack.start)
+  var lenLen = varint.encodingLength(ack.length)
+  var buf = Buffer.alloc(1 + nLen + startLen + lenLen)
+  var offset = 0
+  buf[offset] = RECEIPT_REQ
+  offset += 1
+  writeBuf(buf, offset, varint.encode(n))
+  offset += nLen
+  writeBuf(buf, offset, varint.encode(ack.start))
+  offset += startLen
+  writeBuf(buf, offset, varint.encode(ack.length))
+  offset += lenLen
+  return buf
+}
+
+function receiptFrom (key) {
+  var buf = Buffer.alloc(1 + key.length)
+  buf[0] = RECEIPT_SET_FROM
+  writeBuf(buf, 1, key)
+  return buf
+}
+
+function receiptOk (n, coreLen) {
+  var nLen = varint.encodingLength(n)
+  var csLen = varint.encodingLength(coreLen)
+  var buf = Buffer.alloc(1 + nLen + csLen)
+  var offset = 0
+  buf[offset] = RECEIPT_RES_OK
+  offset += 1
+  writeBuf(buf, offset, varint.encode(n))
+  offset += nLen
+  writeBuf(buf, offset, varint.encode(coreLen))
+  offset += csLen
+  return buf
+}
+
+function receiptFail (n, msg) {
+  var nLen = varint.encodingLength(n)
+  var buf = Buffer.alloc(1 + nLen + msg.length)
+  var offset = 0
+  buf[offset] = RECEIPT_RES_FAIL
+  offset += 1
+  writeBuf(buf, offset, varint.encode(n))
+  offset += nLen
+  writeBuf(buf, offset, msg)
+  return buf
+}
+
+function hasAll (bf, start, len, cb) {
+  var pending = 1, finished = false
+  for (var i = 0; i < len; i++) {
+    bf.has(start+i, function (err, ex) {
+      if (finished) return
+      if (err) {
+        finished = true
+        return cb(err)
+      }
+      if (!ex) {
+        finished = true
+        return cb(null, false)
+      }
+      if (--pending === 0) cb(null, true)
+    })
+  }
+  if (--pending === 0) cb(null, true)
+}
